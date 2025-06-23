@@ -46,6 +46,20 @@ class TelegramBot:
             await asyncio.sleep(300)  # 5 דקות
             self.load_blocked_keywords()
     
+    async def start_command(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
+        """פקודת התחלה - לבדיקה שהבוט עובד"""
+        if update.message.chat.type in ['group', 'supergroup']:
+            await update.message.reply_text(
+                "🤖 הבוט פעיל ועובד!\n\n"
+                "פקודות זמינות:\n"
+                "• /cleanup - ניקוי הודעות הצטרפות ישנות (למנהלים בלבד)\n\n"
+                "הבוט מוחק אוטומטית:\n"
+                "• הודעות הצטרפות וניתוק\n"
+                "• הודעות עם מילות מפתח חסומות"
+            )
+        else:
+            await update.message.reply_text("הבוט עובד רק בקבוצות!")
+    
     async def is_admin(self, context: ContextTypes.DEFAULT_TYPE, chat_id: int, user_id: int) -> bool:
         """בדיקה אם המשתמש הוא מנהל בקבוצה"""
         try:
@@ -235,9 +249,10 @@ class TelegramBot:
         # יצירת האפליקציה
         application = Application.builder().token(self.bot_token).build()
         
-        # הוספת handlers
-        application.add_handler(MessageHandler(filters.ALL, self.handle_message))
+        # הוספת handlers - חשוב: הפקודות לפני MessageHandler
         application.add_handler(CommandHandler("cleanup", self.cleanup_old_join_messages))
+        application.add_handler(CommandHandler("start", self.start_command))
+        application.add_handler(MessageHandler(filters.ALL, self.handle_message))
         application.add_error_handler(self.error_handler)
         
         # הפעלת הבוט
