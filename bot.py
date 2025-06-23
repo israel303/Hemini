@@ -145,9 +145,6 @@ class TelegramBot:
         application.add_handler(MessageHandler(filters.ALL, self.handle_message))
         application.add_error_handler(self.error_handler)
         
-        # הפעלת טעינה מחדש תקופתית
-        asyncio.create_task(self.reload_keywords_periodically())
-        
         # הפעלת הבוט
         port = int(os.getenv('PORT', 8000))
         logger.info(f"Starting bot on port {port}")
