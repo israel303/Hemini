@@ -1,110 +1,165 @@
 import os
 import logging
+import asyncio
 from telegram import Update
 from telegram.ext import Application, MessageHandler, filters, ContextTypes
+from telegram.constants import ChatMemberStatus
+import aiofiles
 
-# הגדרות לוגינג
+# הגדרת לוגים
 logging.basicConfig(
     format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
     level=logging.INFO
 )
 logger = logging.getLogger(__name__)
 
-# קובץ עם תווים ואמוג'י חסומים
-BANNED_CHARS_FILE = 'banned_chars.txt'
-BANNED_CHARS = set()
-
-def load_banned_chars():
-    """טוען תווים ואמוג'י חסומים מקובץ."""
-    try:
-        with open(BANNED_CHARS_FILE, 'r', encoding='utf-8') as f:
-            for line in f:
-                char = line.strip()
-                if char:
-                    BANNED_CHARS.add(char)
-        logger.info(f"Loaded {len(BANNED_CHARS)} banned characters from {BANNED_CHARS_FILE}")
-    except FileNotFoundError:
-        logger.warning(f"Banned characters file '{BANNED_CHARS_FILE}' not found. No characters will be banned based on this file.")
-    except Exception as e:
-        logger.error(f"Error loading banned characters: {e}")
-
-async def delete_join_messages(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    """מוחק הודעות הצטרפות לקבוצה."""
-    if update.message.new_chat_members:
+class TelegramBot:
+    def __init__(self):
+        self.bot_token = os.getenv('BOT_TOKEN')
+        self.blocked_keywords = set()
+        self.keywords_file = 'blocked_keywords.txt'
+        
+        if not self.bot_token:
+            raise ValueError("BOT_TOKEN environment variable is required")
+    
+    async def load_blocked_keywords(self):
+        """טעינת מילות מפתח חסומות מהקובץ"""
         try:
-            await context.bot.delete_message(chat_id=update.message.chat_id, message_id=update.message.message_id)
-            logger.info(f"Deleted join message in chat {update.message.chat_id}")
+            if os.path.exists(self.keywords_file):
+                async with aiofiles.open(self.keywords_file, 'r', encoding='utf-8') as f:
+                    content = await f.read()
+                    self.blocked_keywords = {
+                        keyword.strip().lower() 
+                        for keyword in content.splitlines() 
+                        if keyword.strip() and not keyword.strip().startswith('#')
+                    }
+                logger.info(f"Loaded {len(self.blocked_keywords)} blocked keywords")
+            else:
+                logger.warning(f"Keywords file {self.keywords_file} not found")
         except Exception as e:
-            logger.error(f"Failed to delete join message in chat {update.message.chat_id}: {e}")
-
-async def handle_message_for_banning(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    """בודק הודעות לתווים ואמוג'י חסומים ומוחק/חוסם משתמשים."""
-    if update.message and update.message.text:
-        text = update.message.text
-        user = update.message.from_user
-        chat_id = update.message.chat_id
-
-        # בדיקה אם ההודעה מכילה תווים חסומים או את אימוג'י 🇵🇸
-        is_banned = False
-        reason = ""
+            logger.error(f"Error loading blocked keywords: {e}")
+    
+    async def reload_keywords_periodically(self):
+        """טעינה מחדש של מילות המפתח כל 5 דקות"""
+        while True:
+            await asyncio.sleep(300)  # 5 דקות
+            await self.load_blocked_keywords()
+    
+    async def is_admin(self, context: ContextTypes.DEFAULT_TYPE, chat_id: int, user_id: int) -> bool:
+        """בדיקה אם המשתמש הוא מנהל בקבוצה"""
+        try:
+            member = await context.bot.get_chat_member(chat_id, user_id)
+            return member.status in [ChatMemberStatus.ADMINISTRATOR, ChatMemberStatus.OWNER]
+        except Exception as e:
+            logger.error(f"Error checking admin status: {e}")
+            return False
+    
+    async def handle_message(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
+        """טיפול בהודעות"""
+        if not update.message or not update.message.chat:
+            return
         
-        # בדיקה עבור אמוג'י 🇵🇸
-        if '🇵🇸' in text:
-            is_banned = True
-            reason = "Palestinian flag emoji"
+        chat = update.message.chat
+        message = update.message
         
-        # בדיקה עבור תווים ערביים ותווים חסומים מהקובץ
-        if not is_banned: # רק אם עדיין לא נחסם בגלל האמוג'י
-            for char_code in range(0x0600, 0x06FF + 1):  # Unicode range for Arabic characters
-                if chr(char_code) in text:
-                    is_banned = True
-                    reason = "Arabic characters"
-                    break
+        # עבודה רק על קבוצות וקבוצות-על
+        if chat.type not in ['group', 'supergroup']:
+            return
+        
+        try:
+            # מחיקת הודעות הצטרפות
+            if message.new_chat_members:
+                logger.info(f"Deleting join message in chat {chat.id}")
+                await message.delete()
+                return
             
-            if not is_banned: # רק אם עדיין לא נחסם בגלל תווים ערביים
-                for banned_char in BANNED_CHARS:
-                    if banned_char in text:
-                        is_banned = True
-                        reason = f"Banned character: '{banned_char}'"
-                        break
-
-        if is_banned:
-            try:
-                # נסה למחוק את ההודעה
-                await context.bot.delete_message(chat_id=chat_id, message_id=update.message.message_id)
-                logger.info(f"Deleted message from user {user.id} ({user.username}) in chat {chat_id} due to {reason}.")
+            # מחיקת הודעות יציאה
+            if message.left_chat_member:
+                logger.info(f"Deleting leave message in chat {chat.id}")
+                await message.delete()
+                return
+            
+            # בדיקת מילות מפתח חסומות
+            if message.text:
+                message_text = message.text.lower()
                 
-                # נסה לחסום את המשתמש
-                # הבוט חייב להיות אדמין עם הרשאת Block Users
-                await context.bot.ban_chat_member(chat_id=chat_id, user_id=user.id)
-                logger.info(f"Banned user {user.id} ({user.username}) from chat {chat_id} due to {reason}.")
-                
-            except Exception as e:
-                logger.error(f"Failed to delete message or ban user {user.id} ({user.username}) in chat {chat_id} for {reason}: {e}")
+                # בדיקה אם ההודעה מכילה מילות מפתח חסומות
+                for keyword in self.blocked_keywords:
+                    if keyword in message_text:
+                        logger.info(f"Found blocked keyword '{keyword}' in message from user {message.from_user.id}")
+                        
+                        # מחיקת ההודעה
+                        await message.delete()
+                        
+                        # בדיקה אם הבוט יכול לחסום משתמשים
+                        bot_member = await context.bot.get_chat_member(chat.id, context.bot.id)
+                        if bot_member.can_restrict_members:
+                            try:
+                                # חסימת המשתמש
+                                await context.bot.ban_chat_member(
+                                    chat_id=chat.id,
+                                    user_id=message.from_user.id
+                                )
+                                logger.info(f"Banned user {message.from_user.id} for using blocked keyword")
+                                
+                                # שליחת הודעה למנהלים (אופציונלי)
+                                username = message.from_user.username or message.from_user.first_name
+                                await context.bot.send_message(
+                                    chat_id=chat.id,
+                                    text=f"🚫 המשתמש {username} נחסם בגלל שימוש במילה חסומה",
+                                    disable_notification=True
+                                )
+                                
+                                # מחיקת הודעת ההתראה לאחר 10 שניות
+                                await asyncio.sleep(10)
+                                try:
+                                    await context.bot.delete_message(
+                                        chat_id=chat.id,
+                                        message_id=context.bot.last_message_id
+                                    )
+                                except:
+                                    pass
+                                    
+                            except Exception as e:
+                                logger.error(f"Error banning user: {e}")
+                        else:
+                            logger.warning("Bot doesn't have permission to ban users")
+                        
+                        break  # יציאה מהלולאה אחרי מציאת המילה הראשונה
+                        
+        except Exception as e:
+            logger.error(f"Error handling message: {e}")
+    
+    async def error_handler(self, update: object, context: ContextTypes.DEFAULT_TYPE):
+        """טיפול בשגיאות"""
+        logger.error(f"Exception while handling an update: {context.error}")
+    
+    def run(self):
+        """הפעלת הבוט"""
+        # יצירת האפליקציה
+        application = Application.builder().token(self.bot_token).build()
+        
+        # הוספת handlers
+        application.add_handler(MessageHandler(filters.ALL, self.handle_message))
+        application.add_error_handler(self.error_handler)
+        
+        # טעינת מילות מפתח והפעלת טעינה מחדש תקופתית
+        loop = asyncio.get_event_loop()
+        loop.create_task(self.load_blocked_keywords())
+        loop.create_task(self.reload_keywords_periodically())
+        
+        # הפעלת הבוט
+        port = int(os.getenv('PORT', 8000))
+        logger.info(f"Starting bot on port {port}")
+        
+        # הפעלה עם webhook ל-Render
+        application.run_webhook(
+            listen="0.0.0.0",
+            port=port,
+            url_path=self.bot_token,
+            webhook_url=f"https://{os.getenv('RENDER_EXTERNAL_URL', 'your-app-name.onrender.com')}/{self.bot_token}"
+        )
 
-def main() -> None:
-    """הפונקציה הראשית שמפעילה את הבוט."""
-    # טען תווים חסומים בהפעלה
-    load_banned_chars()
-
-    # קבל את טוקן הבוט ממשתנה הסביבה
-    token = os.getenv("TELEGRAM_BOT_TOKEN")
-    if not token:
-        logger.error("TELEGRAM_BOT_TOKEN environment variable not set. Exiting.")
-        exit(1)
-
-    application = Application.builder().token(token).build()
-
-    # הוסף handler למחיקת הודעות הצטרפות
-    application.add_handler(MessageHandler(filters.StatusUpdate.NEW_CHAT_MEMBERS, delete_join_messages))
-
-    # הוסף handler לבדיקת הודעות לתווים חסומים ולחסימת משתמשים
-    # חשוב: ודא שהבוט הוא אדמין בקבוצה עם הרשאות מחיקת הודעות וחסימת משתמשים.
-    application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message_for_banning))
-
-    logger.info("Bot started polling...")
-    application.run_polling(allowed_updates=Update.ALL_TYPES)
-
-if __name__ == "__main__":
-    main()
-
+if __name__ == '__main__':
+    bot = TelegramBot()
+    bot.run()
