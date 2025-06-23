@@ -64,9 +64,12 @@ class TelegramBot:
         """בדיקה אם המשתמש הוא מנהל בקבוצה"""
         try:
             member = await context.bot.get_chat_member(chat_id, user_id)
-            return member.status in [ChatMemberStatus.ADMINISTRATOR, ChatMemberStatus.OWNER]
+            logger.info(f"User {user_id} status in chat {chat_id}: {member.status}")
+            is_admin = member.status in [ChatMemberStatus.ADMINISTRATOR, ChatMemberStatus.OWNER]
+            logger.info(f"User {user_id} is admin: {is_admin}")
+            return is_admin
         except Exception as e:
-            logger.error(f"Error checking admin status: {e}")
+            logger.error(f"Error checking admin status for user {user_id} in chat {chat_id}: {e}")
             return False
     
     async def cleanup_old_join_messages(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -168,6 +171,10 @@ class TelegramBot:
         
         chat = update.message.chat
         message = update.message
+        
+        # לוג לבדיקה
+        if message.text and message.text.startswith('/'):
+            logger.info(f"Command received: {message.text} from user {message.from_user.id} in chat {chat.id}")
         
         # עבודה רק על קבוצות וקבוצות-על
         if chat.type not in ['group', 'supergroup']:
