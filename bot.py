@@ -46,6 +46,15 @@ class TelegramBot:
             await asyncio.sleep(300)  # 5 דקות
             self.load_blocked_keywords()
     
+    async def is_admin(self, context: ContextTypes.DEFAULT_TYPE, chat_id: int, user_id: int) -> bool:
+        """בדיקה אם המשתמש הוא מנהל בקבוצה"""
+        try:
+            member = await context.bot.get_chat_member(chat_id, user_id)
+            return member.status in [ChatMemberStatus.ADMINISTRATOR, ChatMemberStatus.OWNER]
+        except Exception as e:
+            logger.error(f"Error checking admin status: {e}")
+            return False
+    
     async def cleanup_old_join_messages(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
         """מחיקת הודעות הצטרפות ישנות (פקודה למנהלים בלבד)"""
         if not update.message or not update.message.chat:
@@ -137,13 +146,6 @@ class TelegramBot:
             await update.message.delete()  # מחיקת הפקודה המקורית
         except:
             pass
-        """בדיקה אם המשתמש הוא מנהל בקבוצה"""
-        try:
-            member = await context.bot.get_chat_member(chat_id, user_id)
-            return member.status in [ChatMemberStatus.ADMINISTRATOR, ChatMemberStatus.OWNER]
-        except Exception as e:
-            logger.error(f"Error checking admin status: {e}")
-            return False
     
     async def handle_message(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
         """טיפול בהודעות"""
@@ -243,11 +245,17 @@ class TelegramBot:
         logger.info(f"Starting bot on port {port}")
         
         # הפעלה עם webhook ל-Render
+        # חשוב: החלף את YOUR_APP_NAME בשם האפליקציה שלך ב-Render
+        app_name = os.getenv('RENDER_SERVICE_NAME', 'your-app-name')
+        webhook_url = f"https://{app_name}.onrender.com/{self.bot_token}"
+        
+        logger.info(f"Setting webhook URL: {webhook_url}")
+        
         application.run_webhook(
             listen="0.0.0.0",
             port=port,
             url_path=self.bot_token,
-            webhook_url=f"https://{os.getenv('RENDER_EXTERNAL_URL', 'your-app-name.onrender.com')}/{self.bot_token}"
+            webhook_url=webhook_url
         )
 
 if __name__ == '__main__':
