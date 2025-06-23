@@ -4,7 +4,6 @@ import asyncio
 from telegram import Update
 from telegram.ext import Application, MessageHandler, filters, ContextTypes
 from telegram.constants import ChatMemberStatus
-import aiofiles
 
 # הגדרת לוגים
 logging.basicConfig(
@@ -22,12 +21,12 @@ class TelegramBot:
         if not self.bot_token:
             raise ValueError("BOT_TOKEN environment variable is required")
     
-    async def load_blocked_keywords(self):
+    def load_blocked_keywords(self):
         """טעינת מילות מפתח חסומות מהקובץ"""
         try:
             if os.path.exists(self.keywords_file):
-                async with aiofiles.open(self.keywords_file, 'r', encoding='utf-8') as f:
-                    content = await f.read()
+                with open(self.keywords_file, 'r', encoding='utf-8') as f:
+                    content = f.read()
                     self.blocked_keywords = {
                         keyword.strip().lower() 
                         for keyword in content.splitlines() 
@@ -43,7 +42,7 @@ class TelegramBot:
         """טעינה מחדש של מילות המפתח כל 5 דקות"""
         while True:
             await asyncio.sleep(300)  # 5 דקות
-            await self.load_blocked_keywords()
+            self.load_blocked_keywords()
     
     async def is_admin(self, context: ContextTypes.DEFAULT_TYPE, chat_id: int, user_id: int) -> bool:
         """בדיקה אם המשתמש הוא מנהל בקבוצה"""
@@ -104,7 +103,7 @@ class TelegramBot:
                                 
                                 # שליחת הודעה למנהלים (אופציונלי)
                                 username = message.from_user.username or message.from_user.first_name
-                                await context.bot.send_message(
+                                notification_msg = await context.bot.send_message(
                                     chat_id=chat.id,
                                     text=f"🚫 המשתמש {username} נחסם בגלל שימוש במילה חסומה",
                                     disable_notification=True
@@ -115,7 +114,7 @@ class TelegramBot:
                                 try:
                                     await context.bot.delete_message(
                                         chat_id=chat.id,
-                                        message_id=context.bot.last_message_id
+                                        message_id=notification_msg.message_id
                                     )
                                 except:
                                     pass
@@ -136,6 +135,9 @@ class TelegramBot:
     
     def run(self):
         """הפעלת הבוט"""
+        # טעינת מילות מפתח
+        self.load_blocked_keywords()
+        
         # יצירת האפליקציה
         application = Application.builder().token(self.bot_token).build()
         
@@ -143,10 +145,8 @@ class TelegramBot:
         application.add_handler(MessageHandler(filters.ALL, self.handle_message))
         application.add_error_handler(self.error_handler)
         
-        # טעינת מילות מפתח והפעלת טעינה מחדש תקופתית
-        loop = asyncio.get_event_loop()
-        loop.create_task(self.load_blocked_keywords())
-        loop.create_task(self.reload_keywords_periodically())
+        # הפעלת טעינה מחדש תקופתית
+        asyncio.create_task(self.reload_keywords_periodically())
         
         # הפעלת הבוט
         port = int(os.getenv('PORT', 8000))
