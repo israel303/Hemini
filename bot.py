@@ -1,9 +1,11 @@
 import os
 import logging
 import asyncio
+from datetime import datetime, timedelta
 from telegram import Update
-from telegram.ext import Application, MessageHandler, filters, ContextTypes
+from telegram.ext import Application, MessageHandler, filters, ContextTypes, CommandHandler
 from telegram.constants import ChatMemberStatus
+from telegram.error import BadRequest, Forbidden
 
 # הגדרת לוגים
 logging.basicConfig(
@@ -44,7 +46,97 @@ class TelegramBot:
             await asyncio.sleep(300)  # 5 דקות
             self.load_blocked_keywords()
     
-    async def is_admin(self, context: ContextTypes.DEFAULT_TYPE, chat_id: int, user_id: int) -> bool:
+    async def cleanup_old_join_messages(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
+        """מחיקת הודעות הצטרפות ישנות (פקודה למנהלים בלבד)"""
+        if not update.message or not update.message.chat:
+            return
+        
+        chat = update.message.chat
+        user = update.message.from_user
+        
+        # בדיקה שהפקודה מופעלת בקבוצה
+        if chat.type not in ['group', 'supergroup']:
+            await update.message.reply_text("הפקודה הזו עובדת רק בקבוצות")
+            return
+        
+        # בדיקה שהמשתמש הוא מנהל
+        if not await self.is_admin(context, chat.id, user.id):
+            await update.message.reply_text("רק מנהלים יכולים להשתמש בפקודה הזו")
+            return
+        
+        # בדיקה שהבוט הוא מנהל
+        bot_member = await context.bot.get_chat_member(chat.id, context.bot.id)
+        if not bot_member.can_delete_messages:
+            await update.message.reply_text("הבוט צריך הרשאות מחיקת הודעות")
+            return
+        
+        status_message = await update.message.reply_text(
+            "🔍 מחפש הודעות הצטרפות ישנות...\n"
+            "⚠️ שים לב: ניתן למחוק רק הודעות מ-48 השעות האחרונות"
+        )
+        
+        deleted_count = 0
+        errors = 0
+        current_message_id = update.message.message_id
+        
+        try:
+            # חיפוש לאחור מההודעה הנוכחית
+            # נבדוק 500 הודעות לאחור (מגבלה סבירה)
+            for message_id in range(current_message_id - 1, max(1, current_message_id - 500), -1):
+                try:
+                    # ננסה לקבל מידע על ההודעה
+                    # אם זו הודעת הצטרפות, ננסה למחוק אותה
+                    await context.bot.delete_message(chat.id, message_id)
+                    deleted_count += 1
+                    
+                    # עדכון סטטוס כל 10 מחיקות
+                    if deleted_count % 10 == 0:
+                        await status_message.edit_text(
+                            f"🗑️ נמחקו {deleted_count} הודעות...\n"
+                            f"⚠️ רק הודעות מ-48 השעות האחרונות נמחקות"
+                        )
+                        await asyncio.sleep(0.5)  # השהיה למניעת rate limit
+                
+                except BadRequest as e:
+                    # רוב ההודעות לא יהיו הודעות הצטרפות, אז נקבל שגיאות
+                    if "Message to delete not found" in str(e):
+                        continue  # הודעה לא קיימת
+                    elif "Message can't be deleted" in str(e):
+                        continue  # הודעה לא ניתנת למחיקה
+                    elif "Too Many Requests" in str(e):
+                        await asyncio.sleep(2)  # המתנה עקב rate limit
+                        continue
+                    else:
+                        errors += 1
+                        if errors > 20:  # יותר מדי שגיאות לא צפויות
+                            break
+                
+                except Exception as e:
+                    errors += 1
+                    if errors > 20:
+                        break
+        
+        except Exception as e:
+            logger.error(f"Error during cleanup: {e}")
+            await status_message.edit_text(f"❌ שגיאה במהלך הניקוי: {str(e)}")
+            return
+        
+        # הודעת סיכום
+        summary = f"✅ סיימתי לנקות!\n"
+        summary += f"🗑️ נמחקו: {deleted_count} הודעות\n"
+        if errors > 0:
+            summary += f"⚠️ שגיאות: {errors}\n"
+        summary += "\n💡 עצה: הוסף אותי כמנהל עם הרשאות מלאות לתוצאות טובות יותר"
+        
+        await status_message.edit_text(summary)
+        
+        # מחיקת הודעת הסיכום לאחר 30 שניות
+        await asyncio.sleep(30)
+        try:
+            await status_message.delete()
+            await update.message.delete()  # מחיקת הפקודה המקורית
+        except:
+            pass
         """בדיקה אם המשתמש הוא מנהל בקבוצה"""
         try:
             member = await context.bot.get_chat_member(chat_id, user_id)
@@ -143,6 +235,7 @@ class TelegramBot:
         
         # הוספת handlers
         application.add_handler(MessageHandler(filters.ALL, self.handle_message))
+        application.add_handler(CommandHandler("cleanup", self.cleanup_old_join_messages))
         application.add_error_handler(self.error_handler)
         
         # הפעלת הבוט
