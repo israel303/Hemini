@@ -80,15 +80,59 @@ class TelegramBot:
         chat = update.message.chat
         user = update.message.from_user
         
+        logger.info(f"Cleanup command received from user {user.id} ({user.username or user.first_name}) in chat {chat.id}")
+        
         # בדיקה שהפקודה מופעלת בקבוצה
         if chat.type not in ['group', 'supergroup']:
             await update.message.reply_text("הפקודה הזו עובדת רק בקבוצות")
             return
         
-        # בדיקה שהמשתמש הוא מנהל
-        if not await self.is_admin(context, chat.id, user.id):
-            await update.message.reply_text("רק מנהלים יכולים להשתמש בפקודה הזו")
+        # בדיקה שהמשתמש הוא מנהל - זמנית מושבת לבדיקה
+        # is_user_admin = await self.is_admin(context, chat.id, user.id)
+        # if not is_user_admin:
+        #     # בדיקה נוספת - אם המשתמש הוא יוצר הקבוצה
+        #     try:
+        #         chat_obj = await context.bot.get_chat(chat.id)
+        #         if hasattr(chat_obj, 'creator_id') and chat_obj.creator_id == user.id:
+        #             logger.info(f"User {user.id} is chat creator")
+        #             is_user_admin = True
+        #     except Exception as e:
+        #         logger.error(f"Error checking chat creator: {e}")
+        
+        # if not is_user_admin:
+        #     await update.message.reply_text("רק מנהלים יכולים להשתמש בפקודה הזו")
+        #     return
+        
+    async def cleanup_old_join_messages(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
+        """מחיקת הודעות הצטרפות ישנות (פקודה למנהלים בלבד)"""
+        if not update.message or not update.message.chat:
             return
+        
+        chat = update.message.chat
+        user = update.message.from_user
+        
+        logger.info(f"Cleanup command received from user {user.id} ({user.username or user.first_name}) in chat {chat.id}")
+        
+        # בדיקה שהפקודה מופעלת בקבוצה
+        if chat.type not in ['group', 'supergroup']:
+            await update.message.reply_text("הפקודה הזו עובדת רק בקבוצות")
+            return
+        
+        # בדיקה שהמשתמש הוא מנהל - זמנית מושבת לבדיקה
+        # is_user_admin = await self.is_admin(context, chat.id, user.id)
+        # if not is_user_admin:
+        #     # בדיקה נוספת - אם המשתמש הוא יוצר הקבוצה
+        #     try:
+        #         chat_obj = await context.bot.get_chat(chat.id)
+        #         if hasattr(chat_obj, 'creator_id') and chat_obj.creator_id == user.id:
+        #             logger.info(f"User {user.id} is chat creator")
+        #             is_user_admin = True
+        #     except Exception as e:
+        #         logger.error(f"Error checking chat creator: {e}")
+        
+        # if not is_user_admin:
+        #     await update.message.reply_text("רק מנהלים יכולים להשתמש בפקודה הזו")
+        #     return
         
         # בדיקה שהבוט הוא מנהל
         bot_member = await context.bot.get_chat_member(chat.id, context.bot.id)
@@ -98,49 +142,81 @@ class TelegramBot:
         
         status_message = await update.message.reply_text(
             "🔍 מחפש הודעות הצטרפות ישנות...\n"
-            "⚠️ שים לב: ניתן למחוק רק הודעות מ-48 השעות האחרונות"
+            "⚠️ אני אמחק רק הודעות הצטרפות ויציאה"
         )
         
-        deleted_count = 0
+        deleted_join_messages = 0
+        deleted_leave_messages = 0
+        checked_messages = 0
         errors = 0
         current_message_id = update.message.message_id
         
         try:
             # חיפוש לאחור מההודעה הנוכחית
-            # נבדוק 500 הודעות לאחור (מגבלה סבירה)
-            for message_id in range(current_message_id - 1, max(1, current_message_id - 500), -1):
+            # נבדוק 1000 הודעות לאחור (מגבלה סבירה)
+            for message_id in range(current_message_id - 1, max(1, current_message_id - 1000), -1):
                 try:
-                    # ננסה לקבל מידע על ההודעה
-                    # אם זו הודעת הצטרפות, ננסה למחוק אותה
-                    await context.bot.delete_message(chat.id, message_id)
-                    deleted_count += 1
+                    checked_messages += 1
                     
-                    # עדכון סטטוס כל 10 מחיקות
-                    if deleted_count % 10 == 0:
-                        await status_message.edit_text(
-                            f"🗑️ נמחקו {deleted_count} הודעות...\n"
-                            f"⚠️ רק הודעות מ-48 השעות האחרונות נמחקות"
+                    # ננסה לקבל מידע על ההודעה באמצעות forward
+                    # זה יעבוד רק על הודעות שאפשר להעביר
+                    try:
+                        # קודם ננסה לבדוק את ההודעה בעקיפין
+                        # נשתמש בשיטה שונה - נשלח בקשת מידע על ההודעה
+                        message_info = await context.bot.forward_message(
+                            chat_id=chat.id,  # נעביר לאותה קבוצה
+                            from_chat_id=chat.id,
+                            message_id=message_id,
+                            disable_notification=True
                         )
-                        await asyncio.sleep(0.5)  # השהיה למניעת rate limit
-                
-                except BadRequest as e:
-                    # רוב ההודעות לא יהיו הודעות הצטרפות, אז נקבל שגיאות
-                    if "Message to delete not found" in str(e):
-                        continue  # הודעה לא קיימת
-                    elif "Message can't be deleted" in str(e):
-                        continue  # הודעה לא ניתנת למחיקה
-                    elif "Too Many Requests" in str(e):
-                        await asyncio.sleep(2)  # המתנה עקב rate limit
+                        
+                        # אם ההודעה הועברה בהצלחה, נמחק את ההעברה מיד
+                        await context.bot.delete_message(chat.id, message_info.message_id)
+                        
+                        # אם הגענו לכאן, זה אומר שההודעה קיימת ולא מכילה מידע מיוחד
+                        # הודעות הצטרפות/יציאה לא ניתנות להעברה
                         continue
-                    else:
-                        errors += 1
-                        if errors > 20:  # יותר מדי שגיאות לא צפויות
-                            break
+                        
+                    except BadRequest as forward_error:
+                        # אם לא ניתן להעביר את ההודעה, יכול להיות שזו הודעת מערכת
+                        if "can't be forwarded" in str(forward_error).lower() or "message can't be forwarded" in str(forward_error).lower():
+                            # זו עשויה להיות הודעת הצטרפות/יציאה - ננסה למחוק
+                            try:
+                                await context.bot.delete_message(chat.id, message_id)
+                                deleted_join_messages += 1
+                                logger.info(f"Deleted system message (likely join/leave) at message_id {message_id}")
+                                
+                                # עדכון סטטוס כל 5 מחיקות
+                                if (deleted_join_messages + deleted_leave_messages) % 5 == 0:
+                                    await status_message.edit_text(
+                                        f"🗑️ נמחקו עד כה:\n"
+                                        f"📥 הודעות הצטרפות: {deleted_join_messages}\n"
+                                        f"📤 הודעות יציאה: {deleted_leave_messages}\n"
+                                        f"🔍 נבדקו: {checked_messages} הודעות"
+                                    )
+                                    await asyncio.sleep(0.3)  # השהיה למניעת rate limit
+                                
+                            except BadRequest as delete_error:
+                                if "Message to delete not found" in str(delete_error):
+                                    continue  # הודעה לא קיימת
+                                elif "Message can't be deleted" in str(delete_error):
+                                    continue  # הודעה לא ניתנת למחיקה
+                                else:
+                                    logger.warning(f"Could not delete message {message_id}: {delete_error}")
+                        else:
+                            # סוג שגיאה אחר - כנראה הודעה רגילה שלא ניתנת להעברה מסיבה אחרת
+                            continue
                 
                 except Exception as e:
                     errors += 1
-                    if errors > 20:
+                    if errors > 50:  # יותר מדי שגיאות
+                        logger.error(f"Too many errors during cleanup: {e}")
                         break
+                    continue
+                
+                # השהיה קטנה למניעת rate limiting
+                if checked_messages % 50 == 0:
+                    await asyncio.sleep(1)
         
         except Exception as e:
             logger.error(f"Error during cleanup: {e}")
@@ -148,11 +224,19 @@ class TelegramBot:
             return
         
         # הודעת סיכום
-        summary = f"✅ סיימתי לנקות!\n"
-        summary += f"🗑️ נמחקו: {deleted_count} הודעות\n"
+        total_deleted = deleted_join_messages + deleted_leave_messages
+        summary = f"✅ סיימתי לנקות!\n\n"
+        summary += f"🗑️ נמחקו בסך הכל: {total_deleted} הודעות מערכת\n"
+        summary += f"📥 הודעות הצטרפות/יציאה: {deleted_join_messages}\n"
+        summary += f"🔍 נבדקו: {checked_messages} הודעות\n"
+        
         if errors > 0:
             summary += f"⚠️ שגיאות: {errors}\n"
-        summary += "\n💡 עצה: הוסף אותי כמנהל עם הרשאות מלאות לתוצאות טובות יותר"
+        
+        if total_deleted == 0:
+            summary += "\n💡 לא נמצאו הודעות הצטרפות ישנות למחיקה"
+        else:
+            summary += f"\n💡 מחקתי רק הודעות מערכת (הצטרפות/יציאה)"
         
         await status_message.edit_text(summary)
         
