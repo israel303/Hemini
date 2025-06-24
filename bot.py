@@ -6,6 +6,8 @@ from telegram import Update
 from telegram.ext import Application, MessageHandler, filters, ContextTypes, CommandHandler
 from telegram.constants import ChatMemberStatus
 from telegram.error import BadRequest, Forbidden
+import aiohttp
+from aiohttp import web
 
 # הגדרת לוגים
 logging.basicConfig(
@@ -19,6 +21,7 @@ class TelegramBot:
         self.bot_token = os.getenv('BOT_TOKEN')
         self.blocked_keywords = set()
         self.keywords_file = 'blocked_keywords.txt'
+        self.last_activity = datetime.now()
         
         if not self.bot_token:
             raise ValueError("BOT_TOKEN environment variable is required")
@@ -43,11 +46,53 @@ class TelegramBot:
     async def reload_keywords_periodically(self):
         """טעינה מחדש של מילות המפתח כל 5 דקות"""
         while True:
-            await asyncio.sleep(300)  # 5 דקות
-            self.load_blocked_keywords()
+            try:
+                await asyncio.sleep(300)  # 5 דקות
+                self.load_blocked_keywords()
+                self.last_activity = datetime.now()
+                logger.info("Reloaded keywords - keeping alive")
+            except Exception as e:
+                logger.error(f"Error in periodic reload: {e}")
+    
+    async def keep_alive_task(self):
+        """משימה לשמירה על הבוט פעיל"""
+        app_name = os.getenv('RENDER_SERVICE_NAME', 'your-app-name')
+        ping_url = f"https://{app_name}.onrender.com/health"
+        
+        while True:
+            try:
+                await asyncio.sleep(600)  # 10 דקות
+                
+                # שליחת בקשת ping לעצמנו
+                async with aiohttp.ClientSession() as session:
+                    try:
+                        async with session.get(ping_url, timeout=30) as response:
+                            if response.status == 200:
+                                logger.info(f"Keep-alive ping successful: {response.status}")
+                            else:
+                                logger.warning(f"Keep-alive ping returned: {response.status}")
+                    except Exception as e:
+                        logger.warning(f"Keep-alive ping failed: {e}")
+                
+                self.last_activity = datetime.now()
+                
+            except Exception as e:
+                logger.error(f"Error in keep-alive task: {e}")
+    
+    async def health_check(self, request):
+        """endpoint לבדיקת בריאות השירות"""
+        uptime = datetime.now() - self.last_activity
+        return web.json_response({
+            'status': 'healthy',
+            'uptime_minutes': int(uptime.total_seconds() / 60),
+            'last_activity': self.last_activity.isoformat(),
+            'blocked_keywords_count': len(self.blocked_keywords)
+        })
     
     async def start_command(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
         """פקודת התחלה - לבדיקה שהבוט עובד"""
+        self.last_activity = datetime.now()
+        
         if update.message.chat.type in ['group', 'supergroup']:
             await update.message.reply_text(
                 "🤖 הבוט פעיל ועובד!\n\n"
@@ -74,6 +119,8 @@ class TelegramBot:
     
     async def cleanup_old_join_messages(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
         """מחיקת הודעות הצטרפות ישנות (פקודה למנהלים בלבד)"""
+        self.last_activity = datetime.now()
+        
         if not update.message or not update.message.chat:
             return
         
@@ -86,53 +133,6 @@ class TelegramBot:
         if chat.type not in ['group', 'supergroup']:
             await update.message.reply_text("הפקודה הזו עובדת רק בקבוצות")
             return
-        
-        # בדיקה שהמשתמש הוא מנהל - זמנית מושבת לבדיקה
-        # is_user_admin = await self.is_admin(context, chat.id, user.id)
-        # if not is_user_admin:
-        #     # בדיקה נוספת - אם המשתמש הוא יוצר הקבוצה
-        #     try:
-        #         chat_obj = await context.bot.get_chat(chat.id)
-        #         if hasattr(chat_obj, 'creator_id') and chat_obj.creator_id == user.id:
-        #             logger.info(f"User {user.id} is chat creator")
-        #             is_user_admin = True
-        #     except Exception as e:
-        #         logger.error(f"Error checking chat creator: {e}")
-        
-        # if not is_user_admin:
-        #     await update.message.reply_text("רק מנהלים יכולים להשתמש בפקודה הזו")
-        #     return
-        
-    async def cleanup_old_join_messages(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
-        """מחיקת הודעות הצטרפות ישנות (פקודה למנהלים בלבד)"""
-        if not update.message or not update.message.chat:
-            return
-        
-        chat = update.message.chat
-        user = update.message.from_user
-        
-        logger.info(f"Cleanup command received from user {user.id} ({user.username or user.first_name}) in chat {chat.id}")
-        
-        # בדיקה שהפקודה מופעלת בקבוצה
-        if chat.type not in ['group', 'supergroup']:
-            await update.message.reply_text("הפקודה הזו עובדת רק בקבוצות")
-            return
-        
-        # בדיקה שהמשתמש הוא מנהל - זמנית מושבת לבדיקה
-        # is_user_admin = await self.is_admin(context, chat.id, user.id)
-        # if not is_user_admin:
-        #     # בדיקה נוספת - אם המשתמש הוא יוצר הקבוצה
-        #     try:
-        #         chat_obj = await context.bot.get_chat(chat.id)
-        #         if hasattr(chat_obj, 'creator_id') and chat_obj.creator_id == user.id:
-        #             logger.info(f"User {user.id} is chat creator")
-        #             is_user_admin = True
-        #     except Exception as e:
-        #         logger.error(f"Error checking chat creator: {e}")
-        
-        # if not is_user_admin:
-        #     await update.message.reply_text("רק מנהלים יכולים להשתמש בפקודה הזו")
-        #     return
         
         # בדיקה שהבוט הוא מנהל
         bot_member = await context.bot.get_chat_member(chat.id, context.bot.id)
@@ -159,12 +159,9 @@ class TelegramBot:
                     checked_messages += 1
                     
                     # ננסה לקבל מידע על ההודעה באמצעות forward
-                    # זה יעבוד רק על הודעות שאפשר להעביר
                     try:
-                        # קודם ננסה לבדוק את ההודעה בעקיפין
-                        # נשתמש בשיטה שונה - נשלח בקשת מידע על ההודעה
                         message_info = await context.bot.forward_message(
-                            chat_id=chat.id,  # נעביר לאותה קבוצה
+                            chat_id=chat.id,
                             from_chat_id=chat.id,
                             message_id=message_id,
                             disable_notification=True
@@ -172,9 +169,6 @@ class TelegramBot:
                         
                         # אם ההודעה הועברה בהצלחה, נמחק את ההעברה מיד
                         await context.bot.delete_message(chat.id, message_info.message_id)
-                        
-                        # אם הגענו לכאן, זה אומר שההודעה קיימת ולא מכילה מידע מיוחד
-                        # הודעות הצטרפות/יציאה לא ניתנות להעברה
                         continue
                         
                     except BadRequest as forward_error:
@@ -194,22 +188,21 @@ class TelegramBot:
                                         f"📤 הודעות יציאה: {deleted_leave_messages}\n"
                                         f"🔍 נבדקו: {checked_messages} הודעות"
                                     )
-                                    await asyncio.sleep(0.3)  # השהיה למניעת rate limit
+                                    await asyncio.sleep(0.3)
                                 
                             except BadRequest as delete_error:
                                 if "Message to delete not found" in str(delete_error):
-                                    continue  # הודעה לא קיימת
+                                    continue
                                 elif "Message can't be deleted" in str(delete_error):
-                                    continue  # הודעה לא ניתנת למחיקה
+                                    continue
                                 else:
                                     logger.warning(f"Could not delete message {message_id}: {delete_error}")
                         else:
-                            # סוג שגיאה אחר - כנראה הודעה רגילה שלא ניתנת להעברה מסיבה אחרת
                             continue
                 
                 except Exception as e:
                     errors += 1
-                    if errors > 50:  # יותר מדי שגיאות
+                    if errors > 50:
                         logger.error(f"Too many errors during cleanup: {e}")
                         break
                     continue
@@ -244,12 +237,14 @@ class TelegramBot:
         await asyncio.sleep(30)
         try:
             await status_message.delete()
-            await update.message.delete()  # מחיקת הפקודה המקורית
+            await update.message.delete()
         except:
             pass
     
     async def handle_message(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
         """טיפול בהודעות"""
+        self.last_activity = datetime.now()
+        
         if not update.message or not update.message.chat:
             return
         
@@ -323,7 +318,7 @@ class TelegramBot:
                         else:
                             logger.warning("Bot doesn't have permission to ban users")
                         
-                        break  # יציאה מהלולאה אחרי מציאת המילה הראשונה
+                        break
                         
         except Exception as e:
             logger.error(f"Error handling message: {e}")
@@ -336,26 +331,34 @@ class TelegramBot:
         """הפעלת הבוט"""
         # טעינת מילות מפתח
         self.load_blocked_keywords()
+        self.last_activity = datetime.now()
         
         # יצירת האפליקציה
         application = Application.builder().token(self.bot_token).build()
         
-        # הוספת handlers - חשוב: הפקודות לפני MessageHandler
+        # הוספת handlers
         application.add_handler(CommandHandler("cleanup", self.cleanup_old_join_messages))
         application.add_handler(CommandHandler("start", self.start_command))
         application.add_handler(MessageHandler(filters.ALL, self.handle_message))
         application.add_error_handler(self.error_handler)
         
+        # הפעלת משימות רקע
+        asyncio.create_task(self.reload_keywords_periodically())
+        asyncio.create_task(self.keep_alive_task())
+        
+        # הגדרת web server עם health check
+        app = web.Application()
+        app.router.add_get('/health', self.health_check)
+        
         # הפעלת הבוט
         port = int(os.getenv('PORT', 8000))
         logger.info(f"Starting bot on port {port}")
         
-        # הפעלה עם webhook ל-Render
-        # חשוב: החלף את YOUR_APP_NAME בשם האפליקציה שלך ב-Render
         app_name = os.getenv('RENDER_SERVICE_NAME', 'your-app-name')
         webhook_url = f"https://{app_name}.onrender.com/{self.bot_token}"
         
         logger.info(f"Setting webhook URL: {webhook_url}")
+        logger.info("Starting background tasks for keep-alive and keyword reloading")
         
         application.run_webhook(
             listen="0.0.0.0",
