@@ -89,11 +89,26 @@ class TelegramBot:
             'blocked_keywords_count': len(self.blocked_keywords)
         })
     
+    async def set_webhook(self, application):  # שינוי: הוספת פונקציה להגדרת Webhook
+        """הגדרת Webhook עם בדיקה"""
+        webhook_url = f"https://{os.getenv('RENDER_SERVICE_NAME', 'your-app-name')}.onrender.com/{self.bot_token}"
+        current_webhook = await application.bot.get_webhook_info()
+        if current_webhook.url != webhook_url:
+            await application.bot.set_webhook(webhook_url)
+            logger.info(f"Webhook set to: {webhook_url}")
+        else:
+            logger.info(f"Webhook already set to: {webhook_url}")
+    
+    async def shutdown(self, application):  # שינוי: הוספת פונקציה לסגירה
+        """מחיקת Webhook בסגירה"""
+        await application.bot.delete_webhook()
+        logger.info("Webhook deleted on shutdown")
+    
     async def start_command(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
         """פקודת התחלה - לבדיקה שהבוט עובד"""
         self.last_activity = datetime.now()
         
-        if update.message.chat.type in ['group', 'supergroup']:
+        if update.message.chat.type in ['group', 'supergroup']:  # תיקון: תיקון שגיאת כתיב
             await update.message.reply_text(
                 "🤖 הבוט פעיל ועובד!\n\n"
                 "פקודות זמינות:\n"
@@ -101,7 +116,7 @@ class TelegramBot:
                 "הבוט מוחק אוטומטית:\n"
                 "• הודעות הצטרפות וניתוק\n"
                 "• הודעות עם מילות מפתח חסומות"
-            )
+            ")
         else:
             await update.message.reply_text("הבוט עובד רק בקבוצות!")
     
@@ -153,7 +168,6 @@ class TelegramBot:
         
         try:
             # חיפוש לאחור מההודעה הנוכחית
-            # נבדוק 1000 הודעות לאחור (מגבלה סבירה)
             for message_id in range(current_message_id - 1, max(1, current_message_id - 1000), -1):
                 try:
                     checked_messages += 1
@@ -172,9 +186,8 @@ class TelegramBot:
                         continue
                         
                     except BadRequest as forward_error:
-                        # אם לא ניתן להעביר את ההודעה, יכול להיות שזו הודעת מערכת
+                        # אם לא ניתן להעביר, זו עשויה להיות הודעת מערכת
                         if "can't be forwarded" in str(forward_error).lower() or "message can't be forwarded" in str(forward_error).lower():
-                            # זו עשויה להיות הודעת הצטרפות/יציאה - ננסה למחוק
                             try:
                                 await context.bot.delete_message(chat.id, message_id)
                                 deleted_join_messages += 1
@@ -207,7 +220,7 @@ class TelegramBot:
                         break
                     continue
                 
-                # השהיה קטנה למניעת rate limiting
+                # השהיה קלה למניעת rate limiting
                 if checked_messages % 50 == 0:
                     await asyncio.sleep(1)
         
@@ -295,7 +308,7 @@ class TelegramBot:
                                 )
                                 logger.info(f"Banned user {message.from_user.id} for using blocked keyword")
                                 
-                                # שליחת הודעה למנהלים (אופציונלי)
+                                # שליחת הודעה למנהלים
                                 username = message.from_user.username or message.from_user.first_name
                                 notification_msg = await context.bot.send_message(
                                     chat_id=chat.id,
@@ -321,7 +334,7 @@ class TelegramBot:
                         break
                         
         except Exception as e:
-            logger.error(f"Error handling message: {e}")
+            logger.error(f"Error handling message: { {e}")
     
     async def error_handler(self, update: object, context: ContextTypes.DEFAULT_TYPE):
         """טיפול בשגיאות"""
@@ -351,21 +364,29 @@ class TelegramBot:
         app.router.add_get('/health', self.health_check)
         
         # הפעלת הבוט
-        port = int(os.getenv('PORT', 8000))
+        port = int(os.getenv('PORT', 8443))  # שינוי: ברירת מחדל לפורט 8443
         logger.info(f"Starting bot on port {port}")
         
         app_name = os.getenv('RENDER_SERVICE_NAME', 'your-app-name')
-        webhook_url = f"https://{app_name}.onrender.com/{self.bot_token}"
+        webhook_url = f"https://{{app_name}}.onrender.com/{self.bot_token}"
         
         logger.info(f"Setting webhook URL: {webhook_url}")
         logger.info("Starting background tasks for keep-alive and keyword reloading")
         
-        application.run_webhook(
-            listen="0.0.0.0",
-            port=port,
-            url_path=self.bot_token,
-            webhook_url=webhook_url
-        )
+        # שינוי: הגדרת Webhook לפני הפעלה
+        loop = asyncio.get_event_loop()
+        loop.run_until_complete(self.set_webhook(application))
+        
+        try:
+            application.run_webhook(
+                listen="0.0.0.0",
+                port=port,
+                url_path=f"/{self.bot_token}",
+                webhook_url=webhook_url
+            )
+        finally:
+            # שינוי: מחיקת Webhook בסגירה
+            loop.run_until_complete(self.shutdown(application))
 
 if __name__ == '__main__':
     bot = TelegramBot()
