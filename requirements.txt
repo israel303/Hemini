@@ -1,3 +1,2 @@
-python-telegram-bot[webhooks]==20.7
-aiohttp==3.9.1
-asyncio
+python-telegram-bot[webhooks]==20.4
+aiohttp==3.8.5
